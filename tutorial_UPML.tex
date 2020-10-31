@@ -1,0 +1,510 @@
+\documentclass[a4paper,10pt]{article}
+\usepackage[english, brazil]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage[active]{srcltx}
+\usepackage[all]{xy}
+\usepackage{color}
+\usepackage{parcolumns}
+\usepackage{lscape}
+\usepackage{psfrag}
+\usepackage{setspace}
+%opening
+\title{Implementação do método FDTD para solução das Equações de Maxwell com UPML com condição de contorno}
+\author{Dr. Maicon Saul Faria}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Este documento serve como referencia das equações e dos procedimentos usados na implementação de Uniaxial Perfect Matched Layer UPML nos algoritmos FDTD para paralelismo em GPU.
+\end{abstract}
+
+\section{Introdução}
+A técnica UPML consiste em considerar um material anisotrópico como contorno do domínio computacional e escolher as componentes adequadas dos tensores permissividade elétrica  e permeabilidade magnética. Desta forma obtemos contornos que não refletem ondas planas para qualquer ângulo incidente e absorvem estas ondas fazendo com que os campos que decaiam exponencialmente com  a distância. Os detalhes desta técnica podem ser encontrados no Taflove 2a edição no capítulo 7.
+Inicialmente vamos considerar as equações de Faraday (\ref{Faraday}) e Ampere (\ref{Ampere}) onde foi aplicada a transformadas de Fourier temporal nos campos:
+\begin{equation}
+ \nabla \times \mathbf{\hat{H}} = j \omega \epsilon \, \mathbf{\bar{S}}\, \mathbf{\hat{E}}\,, \label{Ampere}
+\end{equation} 
+
+\begin{equation}
+\nabla \times \mathbf{\hat{E}} = j \omega \mu \, \mathbf{\bar{S}}\, \mathbf{\hat{H}}\,,\label{Faraday}
+\end{equation} 
+onde $\mathbf{\hat{E}}$ e $\mathbf{\hat{H}}$ são as transformadas de Fourier do campo elétrico e magnético respectivamente, $\epsilon$ é a permissividade elétrica e $\mu$ a permeabilidade magnética do meio, $\mathbf{\bar{S}}$ é o tensor que proporciona a anisotropia das propriedades eletromagnéticas.
+
+O tensor $\mathbf{\bar{S}}$ escolhido para minimizar a reflexão para ondas incidentes é dado pela equação (\ref{tensor}),
+
+\begin{equation}
+  \mathbf{\bar{S}} = \begin{Vmatrix}
+ \frac{s_y s_z}{s_x} &  &  \\
+  & \frac{s_x s_z}{s_y} &  \\
+  &  & \frac{s_x s_y}{s_z}
+\end{Vmatrix}\,, \label{tensor}
+\end{equation}
+onde, 
+
+\begin{equation}
+ s_l=\kappa_l + \frac{\sigma_l}{j\omega \epsilon}\,,  \label{sigma}
+\end{equation}
+com $l=x,y,z$. O valores dos parâmetros $\kappa_l$ e $\sigma_l$ serão descritos mais adiante, $\omega$ é o termo de frequência da transformada de Fourier.
+
+As definições das relações constitutivas, dadas pelas equações (\ref{cons1}-\ref{cons6}), são escolhidas de forma a evitar constantes dependentes de $\omega$ e assim evitar a necessidade de convoluções.
+
+\begin{equation}
+\mathbf{\hat{D}_x}=\dfrac{\epsilon s_z}{s_x}\mathbf{\hat{E}_x}\,, \label{cons1}
+\end{equation}
+\begin{equation}
+\mathbf{\hat{D}_y}=\dfrac{\epsilon s_x}{s_y}\mathbf{\hat{E}_y}\,,\label{cons2}
+\end{equation}
+\begin{equation}
+\mathbf{\hat{D}_z}=\dfrac{\epsilon s_y}{z_x} \mathbf{\hat{E}_z}\,,\label{cons3}
+\end{equation}
+\begin{equation}
+\mathbf{\hat{B}_x}=\dfrac{\mu s_z}{s_x}\mathbf{\hat{H}_x}\,,\label{cons4}
+\end{equation}
+\begin{equation}
+\mathbf{\hat{B}_y}=\dfrac{\mu s_x}{s_y}\mathbf{\hat{H}_y}\,,\label{cons5}
+\end{equation}
+\begin{equation}
+\mathbf{\hat{B}_z}=\dfrac{\mu s_y}{s_z}\mathbf{\hat{H}_z}\,.\label{cons6}
+\end{equation}
+
+Substituindo as equações (\ref{cons1}-\ref{cons6}) em  (\ref{Faraday}) e (\ref{Ampere}) obtemos,
+
+\begin{equation}
+  \begin{vmatrix}
+ \dfrac{\partial \hat{H}_z}{\partial y} - \dfrac{\partial \hat{H}_y}{\partial z}  \\
+\\
+ \dfrac{\partial \hat{H}_x}{\partial z} - \dfrac{\partial \hat{H}_z}{\partial x}  \\
+\\ 
+\dfrac{\partial \hat{H}_y}{\partial x} - \dfrac{\partial \hat{H}_x}{\partial y}  \\
+  \end{vmatrix} 
+= i \omega \begin{Vmatrix}
+ s_y &  &  \\ \\
+  & s_z &  \\ \\
+  &  & s_x 
+\end{Vmatrix} 
+ \begin{vmatrix}
+ \hat{D}_x \\ \\
+ \hat{D}_y \\ \\
+ \hat{D}_z \\ \\
+  \end{vmatrix}  \label{tensor-Ampere}
+\end{equation}
+
+\begin{equation}
+ \begin{vmatrix}
+ \dfrac{\partial \hat{E}_z}{\partial y} - \dfrac{\partial \hat{E}_y}{\partial z}  \\
+\\
+ \dfrac{\partial \hat{E}_x}{\partial z} - \dfrac{\partial \hat{E}_z}{\partial x}  \\
+\\ 
+\dfrac{\partial \hat{E}_y}{\partial x} - \dfrac{\partial \hat{E}_x}{\partial y}  \\
+  \end{vmatrix} 
+= -j \omega \begin{Vmatrix}
+ s_y &  &  \\ \\
+  & s_z &  \\ \\
+  &  & s_x 
+\end{Vmatrix} 
+ \begin{vmatrix}
+ \hat{H}_x \\ \\
+ \hat{H}_y \\ \\
+ \hat{H}_z \\ \\
+  \end{vmatrix}  \label{tensor-Faraday}
+\end{equation}
+
+Usando a equação (\ref{sigma}) em  e (\ref{tensor-Ampere}), (\ref{tensor-Faraday}) e tomando a transformada inversa de Fourier,
+
+\begin{equation}
+\begin{vmatrix}
+ \dfrac{\partial H_z}{\partial y} - \dfrac{\partial H_y}{\partial z}  \\
+\\
+ \dfrac{\partial H_x}{\partial z} - \dfrac{\partial H_z}{\partial x}  \\
+\\ 
+\dfrac{\partial H_y}{\partial x} - \dfrac{\partial H_x}{\partial y}  \\
+  \end{vmatrix} 
+= \dfrac{\partial}{\partial t} \begin{Vmatrix}
+ \kappa_y &  &  \\ \\
+  & \kappa_z &  \\ \\
+  &  & \kappa_x 
+\end{Vmatrix} 
+ \begin{vmatrix}
+ D_x \\ \\
+ D_y \\ \\
+ D_z 
+ \end{vmatrix} +  
+\frac{1}{\epsilon}
+\begin{Vmatrix}
+ \sigma_y &  &  \\ \\
+  & \sigma_z &  \\ \\
+  &  & \sigma_x 
+\end{Vmatrix} 
+ \begin{vmatrix}
+ D_x \\ \\
+ D_y \\ \\
+ D_z 
+  \end{vmatrix} \label{base-Ampere}
+\end{equation}
+
+\begin{equation}
+\begin{vmatrix}
+ \dfrac{\partial E_z}{\partial y} - \dfrac{\partial E_y}{\partial z}  \\
+\\
+ \dfrac{\partial E_x}{\partial z} - \dfrac{\partial E_z}{\partial x}  \\
+\\ 
+\dfrac{\partial E_y}{\partial x} - \dfrac{\partial E_x}{\partial y}  \\
+  \end{vmatrix} 
+= -\dfrac{\partial}{\partial t} \begin{Vmatrix}
+ \kappa_y &  &  \\ \\
+  & \kappa_z &  \\ \\
+  &  & \kappa_x 
+\end{Vmatrix} 
+ \begin{vmatrix}
+ B_x \\ \\
+ B_y \\ \\
+ B_z 
+ \end{vmatrix}  
+-\frac{1}{\epsilon}
+\begin{Vmatrix}
+ \sigma_y &  &  \\ \\
+  & \sigma_z &  \\ \\
+  &  & \sigma_x 
+\end{Vmatrix} 
+ \begin{vmatrix}
+ B_x \\ \\
+ B_y \\ \\
+ B_z 
+  \end{vmatrix} \label{base-Faraday}
+\end{equation}
+
+\section{Caso 2-d TEz}
+
+As derivadas em  se anulam. As componentes das equações (\ref{base-Ampere}) e (\ref{base-Faraday}) necessárias são:
+
+\begin{equation}
+\dfrac{\partial H_z}{\partial y}=\kappa_y\dfrac{\partial D_x}{\partial t}+ \frac{\sigma_y}{\epsilon}D_x
+\end{equation}
+
+\begin{equation}
+\dfrac{\partial H_z}{\partial x}=-\kappa_z\dfrac{\partial D_y}{\partial t}- \frac{\sigma_z}{\epsilon}D_y
+\end{equation}
+
+\begin{equation}
+\dfrac{\partial E_y}{\partial x}-\dfrac{\partial E_x}{\partial y}=-\kappa_x\dfrac{\partial B_z}{\partial t}- \frac{\sigma_x}{\epsilon}B_z
+\end{equation}
+
+As equações são discretizadas segundo o esquema de Yee:
+
+\begin{align}
+\frac{H_z |_{i,j+1}^{n}-H_z |_{i,j}^{n}}{\Delta y}
+= \kappa_y \frac{D_x |_{i,j+1/2}^{n+1/2}-D_x |_{i,j+1/2}^{n-1/2}}{\Delta t} \nonumber
+\\+ \frac{\sigma_y}{\epsilon}\frac{D_x |_{i,j+1/2}^{n+1/2}+D_x |_{i,j+1/2}^{n-1/2}}{2}\,, \label{discr1}
+\end{align}
+
+\begin{align}
+\frac{H_z |_{i+1,j}^{n}-H_z |_{i,j}^{n}}{\Delta x}
+= - \kappa_z \frac{D_y |_{i+1/2,j}^{n+1/2}-D_y |_{i+1/2,j}^{n-1/2}}{\Delta t} \nonumber
+\\ - \frac{\sigma_z}{\epsilon}\frac{D_y |_{i+1/2,j}^{n+1/2}+D_y |_{i+1/2,j}^{n-1/2}}{2}\,, \label{discr2}
+\end{align}
+
+\begin{align}
+\frac{E_y |_{i+1/2,j}^{n+1/2}-E_y |_{i-1/2,j}^{n+1/2}}{\Delta x}
+-\frac{E_x |_{i,j+1/2}^{n+1/2}-E_x |_{i,j-1/2}^{n+1/2}}{\Delta y} \nonumber
+\\= \kappa_x \frac{ B_z |_{i,j}^{n+1}-B_z |_{i,j}^{n}}{\Delta t}
++ \frac{\sigma_x}{\epsilon}\frac{B_z |_{i,j}^{n+1}+B_z |_{i,j}^{n}}{2}\,. \label{discr3}
+\end{align}
+
+
+Devemos discretizar também as relações constitutivas (\ref{cons1}), (\ref{cons2}) e (\ref{cons6}), substituindo (\ref{sigma}) nessas relações e tomando a transformada de Fourier inversa, obtemos:
+
+\begin{equation}
+\kappa_x \dfrac{\partial D_x}{\partial t} + \frac{\sigma_x}{\epsilon}D_x=
+\epsilon \left( \kappa_z \dfrac{\partial E_x}{\partial t} + \frac{\sigma_z}{\epsilon}E_x\right)\,,
+\end{equation}
+
+\begin{equation}
+\kappa_y \dfrac{\partial D_y}{\partial t} + \frac{\sigma_y}{\epsilon}D_y=
+\epsilon \left( \kappa_x \dfrac{\partial E_y}{\partial t} + \frac{\sigma_x}{\epsilon}E_y\right)\,,
+\end{equation}
+
+\begin{equation}
+\kappa_z \dfrac{\partial B_z}{\partial t} + \frac{\sigma_z}{\epsilon}H_z=
+\mu \left( \kappa_y \dfrac{\partial H_z}{\partial t} + \frac{\sigma_y}{\epsilon}H_z\right)\,.
+\end{equation}
+
+Discretizando usando novamente o esquema de Yee:
+
+\begin{align}
+\kappa_x \frac{ D_x |_{i,j+1/2}^{n+1/2}-D_x |_{i,j+1/2}^{n-1/2}}{\Delta t}
++ \frac{\sigma_x}{\epsilon}\frac{D_x |_{i,j+1/2}^{n+1/2}+D_x |_{i,j+1/2}^{n-1/2}}{2}= \nonumber
+\\ \epsilon \left( \kappa_z \frac{ E_x |_{i,j+1/2}^{n+1/2}-E_x |_{i,j+1/2}^{n-1/2}}{\Delta t}
++ \frac{\sigma_z}{\epsilon}\frac{E_x |_{i,j+1/2}^{n+1/2}+E_x |_{i,j+1/2}^{n-1/2}}{2}\right)\,, \label{discr4}
+\end{align}
+
+\begin{align}
+\kappa_y \frac{ D_y |_{i+1/2,j}^{n+1/2}-D_y |_{i+1/2,j}^{n-1/2}}{\Delta t}
++ \frac{\sigma_y}{\epsilon}\frac{D_y |_{i+1/2,j}^{n+1/2}+D_y |_{i+1/2,j}^{n-1/2}}{2}= \nonumber
+\\ \epsilon \left( \kappa_x \frac{ E_y |_{i+1/2,j}^{n+1/2}-E_y |_{i+1/2,j}^{n-1/2}}{\Delta t}
++ \frac{\sigma_x}{\epsilon}\frac{E_y |_{i+1/2,j}^{n+1/2}+E_y |_{i+1/2,j}^{n-1/2}}{2}\right)\,, \label{discr5}
+\end{align}
+
+\begin{align}
+\kappa_z \frac{ B_z |_{i,j}^{n+1}-B_z |_{i,j}^{n}}{\Delta t}
++ \frac{\sigma_z}{\epsilon}\frac{B_z |_{i,j}^{n+1}+B_z |_{i,j}^{n}}{2}\nonumber
+\\ =\mu \left( \kappa_y \frac{ H_z |_{i,j}^{n+1}-H_z |_{i,j}^{n}}{\Delta t}
++ \frac{\sigma_y}{\epsilon}\frac{H_z |_{i,j}^{n+1}+H_z |_{i,j}^{n}}{2}\right)\,. \label{discr6}
+\end{align}
+
+Isolando adequadamente os termos das equações (\ref{discr1}-\ref{discr3}) e (\ref{discr4}-\ref{discr6}),
+
+\begin{equation}
+ \left( \frac{\kappa_y}{\Delta t} + \frac{\sigma_y}{2 \epsilon} \right) D_x |_{i,j+1/2}^{n+1/2} = 
+\left( \frac{\kappa_y}{\Delta t} - \frac{\sigma_y}{2 \epsilon} \right) D_x |_{i,j+1/2}^{n-1/2}+
+\frac{H_z |_{i,j+1}^{n}-H_z |_{i,j}^{n}}{\Delta y}\,
+\end{equation}
+
+\begin{equation}
+ \left( \frac{\kappa_z}{\Delta t} + \frac{\sigma_z}{2 \epsilon} \right) D_y |_{i+1/2,j}^{n+1/2} = 
+\left( \frac{\kappa_z}{\Delta t} - \frac{\sigma_z}{2 \epsilon} \right) D_y |_{i+1/2,j}^{n-1/2} -
+\frac{H_z |_{i+1,j}^{n}-H_z |_{i,j}^{n}}{\Delta x}\,
+\end{equation}
+
+\begin{equation}
+\left( \frac{\kappa_x}{\Delta t} + \frac{\sigma_x}{2 \epsilon} \right) B_z |_{i,j}^{n+1} = 
+\left( \frac{\kappa_x}{\Delta t} - \frac{\sigma_x}{2 \epsilon} \right) B_z |_{i,j}^{n} +
+\frac{E_y |_{i+1/2,j}^{n+1/2}-E_y |_{i-1/2,j}^{n+1/2}}{\Delta x}
+-\frac{E_x |_{i,j+1/2}^{n+1/2}-E_x |_{i,j-1/2}^{n+1/2}}{\Delta y}\,
+\end{equation}
+
+\begin{equation}
+\left( \frac{\kappa_z}{\Delta t} + \frac{\sigma_z}{2 \epsilon} \right) E_x |_{i,j+1/2}^{n+1/2} =
+\left( \frac{\kappa_z}{\Delta t} - \frac{\sigma_z}{2 \epsilon} \right) E_x |_{i,j+1/2}^{n-1/2} +
+\frac{1}{\epsilon} \left( \frac{\kappa_x}{\Delta t} + \frac{\sigma_x}{2 \epsilon} \right)  D_x |_{i,j+1/2}^{n+1/2} +
+\frac{1}{\epsilon} \left( \frac{\kappa_x}{\Delta t} - \frac{\sigma_x}{2 \epsilon} \right)  D_x |_{i,j+1/2}^{n-1/2}\,
+\end{equation}
+
+\begin{equation}
+\left( \frac{\kappa_x}{\Delta t} + \frac{\sigma_x}{2 \epsilon} \right) E_y |_{i+1/2,j}^{n+1/2} =
+\left( \frac{\kappa_x}{\Delta t} - \frac{\sigma_x}{2 \epsilon} \right) E_y |_{i+1/2,j}^{n-1/2} +
+\frac{1}{\epsilon} \left( \frac{\kappa_y}{\Delta t} + \frac{\sigma_y}{2 \epsilon} \right)  D_y |_{i+1/2,j}^{n+1/2} -
+\frac{1}{\epsilon} \left( \frac{\kappa_y}{\Delta t} - \frac{\sigma_y}{2 \epsilon} \right)  D_y |_{i+1/2,j}^{n-1/2}\,
+\end{equation}
+
+\begin{equation}
+\left( \frac{\kappa_y}{\Delta t} + \frac{\sigma_y}{2 \epsilon} \right) H_z |_{i,j}^{n+1} = 
+\left( \frac{\kappa_y}{\Delta t} - \frac{\sigma_y}{2 \epsilon} \right) H_z |_{i,j}^{n} +
+\frac{1}{\mu} \left( \frac{\kappa_z}{\Delta t} + \frac{\sigma_z}{2 \epsilon} \right) B_z |_{i,j}^{n+1} -
+\frac{1}{\mu} \left( \frac{\kappa_z}{\Delta t} - \frac{\sigma_z}{2 \epsilon} \right) B_z |_{i,j}^{n}\,.
+\end{equation}
+
+\section{Caso 3-d}
+
+Os elementos da equação \ref{tensor-Ampere} \ref{tensor-Faraday} são
+
+\begin{equation}
+ \dfrac{\partial H_z}{\partial y} - \dfrac{\partial H_y}{\partial z} = \kappa_y \dfrac{\partial D_x}{\partial t} + \frac{\sigma_y}{\epsilon} \partial D_x \label{pre-disc1}
+\end{equation}
+
+\begin{equation}
+ \dfrac{\partial H_x}{\partial z} - \dfrac{\partial H_z}{\partial x} = \kappa_z \dfrac{\partial D_y}{\partial t} + \frac{\sigma_z}{\epsilon} \partial D_y \label{pre-disc2}
+\end{equation}
+
+\begin{equation}
+\dfrac{\partial H_y}{\partial x} - \dfrac{\partial H_x}{\partial y} = \kappa_x \dfrac{\partial D_z}{\partial t} + \frac{\sigma_x}{\epsilon} \partial D_z \label{pre-disc3}
+\end{equation}
+
+\begin{equation}
+ \dfrac{\partial E_z}{\partial y} - \dfrac{\partial E_y}{\partial z} = -\kappa_y \dfrac{\partial B_x}{\partial t} - \frac{\sigma_y}{\epsilon} \partial B_x \label{pre-disc4}
+\end{equation}
+
+\begin{equation}
+ \dfrac{\partial E_x}{\partial z} - \dfrac{\partial E_z}{\partial x} = -\kappa_z \dfrac{\partial B_y}{\partial t} - \frac{\sigma_z}{\epsilon} \partial B_y \label{pre-disc5}
+\end{equation}
+
+\begin{equation}
+\dfrac{\partial E_y}{\partial x} - \dfrac{\partial E_x}{\partial y} = -\kappa_x \dfrac{\partial B_z}{\partial t} - \frac{\sigma_x}{\epsilon} \partial B_z \label{pre-disc6}
+\end{equation}
+
+\begin{figure}[H]
+ 
+\setlength{\unitlength}{3500sp}%
+%
+\begin{picture}(6192,5056)(3181,-5583)
+\thinlines
+{\put(3691,-5101){\framebox(2835,2835){}}
+}
+{\put(6523,-5097){\line( 3, 2){1433.077}}
+}
+{\multiput(3688,-5097)(315.50101,210.33401){5}{\line( 3, 2){200.073}}
+}
+{\put(5131,-1321){\line( 1, 0){2790}}
+}
+{\put(7921,-1366){\line( 0,-1){2835}}
+}
+{\multiput(7921,-4156)(-113.87755,0.00000){25}{\line(-1, 0){ 56.939}}
+}
+{\multiput(5131,-1321)(0.00000,-115.71429){25}{\line( 0,-1){ 57.857}}
+}
+% {\put(8776,-8026){\vector( 1, 0){585}}
+% }
+{\put(4861,-5101){\vector( 1, 0){585}}
+}
+{\put(5041,-2266){\vector( 1, 0){585}}
+}
+{\put(6076,-1321){\vector( 1, 0){585}}
+}
+{\put(6523,-2262){\line( 3, 2){1433.077}}
+}
+{\put(4700,-1591){\vector(-3,-2){405}}
+}
+{\put(7471,-1636){\vector(-3,-2){405}}
+}
+{\put(7471,-4471){\vector(-3,-2){405}}
+}
+{\put(3678,-2267){\line( 3, 2){1433.077}}
+}
+{\put(3691,-3931){\vector( 0, 1){630}}
+}
+{\put(6526,-3886){\vector( 0, 1){495}}
+}
+{\put(7921,-3076){\vector( 0, 1){630}}
+}
+{\put(5221,-3436){\vector(-1,-1){382.500}}
+}
+{\put(5851,-1726){\vector( 0, 1){450}}
+}
+{\put(7246,-3301){\vector( 1, 0){585}}
+}
+\put(4906,-5416){$H_y$}%
+\put(3196,-3526){$H_z$}%
+\put(7291,-4921){$H_x$}%
+\put(6841,-1636){$H_x$}%
+\put(4096,-1546){$H_x$}%
+\put(6166,-1186){$H_y$}%
+\put(5401,-1591){$E_z$}%
+\put(5086,-2086){$H_y$}%
+\put(6661,-3796){$H_z$}%
+\put(8011,-2896){$H_z$}%
+\put(4771,-3436){$E_x$}%
+\put(7291,-3076){$E_y$}%
+
+\put(2900,-5416){$(i+\frac{1}{2},j+\frac{1}{2},k-\frac{1}{2})$}%
+\end{picture}%
+\caption{Célula de Yee}
+
+\end{figure}
+Discretizamos as equações de (\ref{pre-disc1}-\ref{pre-disc6}) usando as posições da célula de Yee. Os passos de tem são discretizados usando o algoritmo \textit{leap-frog}:
+
+\begin{eqnarray}
+\frac{H_z|_{i+1/2,j+1/2,k}^{n+1/2}-H_z|_{i+1/2,j-1/2,k}^{n+1/2}}{\Delta y}-\frac{H_y|_{i+1/2,j,k+1/2}^{n+1/2}-H_y|_{i+1/2,j,k-1/2}^{n+1/2}}{\Delta z}= \nonumber\\
+\frac{\kappa_y}{\Delta t} \left( D_x|_{i+1/2,j,k}^{n+1}-D_x|_{i+1/2,j,k}^{n}\right)+ \frac{\sigma_y}{2 \epsilon} \left(D_x|_{i+1/2,j,k}^{n+1}+D_x|_{i+1/2,j,k}^{n}\right) \,,
+\end{eqnarray}
+
+\begin{eqnarray}
+\frac{H_x|_{i,j+1/2,k+1/2}^{n+1/2}-H_x|_{i,j+1/2,k-1/2}^{n+1/2}}{\Delta z}-\frac{H_z|_{i+1/2,j+1/2,k}^{n+1/2}-H_z|_{i-1/2,j+1/2,k}^{n+1/2}}{\Delta x}= \nonumber\\
+\frac{\kappa_z}{\Delta t} \left( D_y|_{i,j+1/2,k}^{n+1}-D_y|_{i,j+1/2,k}^{n}\right)+ \frac{\sigma_z}{2 \epsilon} \left(D_y|_{i,j+1/2,k}^{n+1}+D_y|_{i,j+1/2,k}^{n}\right) \,,
+\end{eqnarray}
+
+\begin{eqnarray}
+\frac{H_y|_{i+1/2,j,k+1/2}^{n+1/2}-H_y|_{i-1/2,j,k+1/2}^{n+1/2}}{\Delta x}-\frac{H_x|_{i,j+1/2,k+1/2}^{n+1/2}-H_x|_{i,j-1/2,k+1/2}^{n+1/2}}{\Delta y}= \nonumber\\
+\frac{\kappa_x}{\Delta t} \left( D_z|_{i,j,k+1/2}^{n+1}-D_z|_{i,j,k+1/2}^{n}\right)+ \frac{\sigma_x}{2 \epsilon} \left(D_z|_{i,j,k+1/2}^{n+1}+D_z|_{i,j,k+1/2}^{n}\right) \,,
+\end{eqnarray}
+
+\begin{eqnarray}
+\frac{E_z|_{i,j,k+1/2}^{n+1}-E_z|_{i,j-1,k+1/2}^{n+1}}{\Delta y}-\frac{E_y|_{i,j+1/2,k}^{n+1}-E_y|_{i,j+1/2,k-1}^{n+1}}{\Delta z}= \nonumber\\
+-\frac{\kappa_y}{\Delta t} \left( B_x|_{i,j+1/2,k+1/2}^{n+3/2}-B_x|_{i,j+1/2,k+1/2}^{n+1/2}\right)- \frac{\sigma_y}{2 \epsilon} \left(B_x|_{i,j+1/2,k+1/2}^{n+3/2}+B_x|_{i,j+1/2,k+1/2}^{n+1/2}\right) \,,
+\end{eqnarray}
+
+\begin{eqnarray}
+\frac{E_x|_{i+1/2,j,k}^{n+1}-E_x|_{i+1/2,j,k-1}^{n+1}}{\Delta z}-\frac{E_z|_{i,j,k+1/2}^{n+1}-E_y|_{i-1,j,k+1/2}^{n+1}}{\Delta x}= \nonumber\\
+-\frac{\kappa_z}{\Delta t} \left( B_y|_{i+1/2,j,k+1/2}^{n+3/2}-B_y|_{i+1/2,j,k+1/2}^{n+1/2}\right)- \frac{\sigma_z}{2 \epsilon} \left(B_y|_{i+1/2,j,k+1/2}^{n+3/2}+B_y|_{i+1/2,j,k+1/2}^{n+1/2}\right) \,,
+\end{eqnarray}
+
+\begin{eqnarray}
+\frac{E_y|_{i,j+1/2,k}^{n+1}-E_y|_{i-1,j+1/2,k}^{n+1}}{\Delta x}-\frac{E_x|_{i+1/2,j,k}^{n+1}-E_y|_{i+1/2,j-1,k}^{n+1}}{\Delta y}= \nonumber\\
+-\frac{\kappa_x}{\Delta t} \left( B_z|_{i+1/2,j+1/2,k}^{n+3/2}-B_z|_{i+1/2,j+1/2,k}^{n+1/2}\right)- \frac{\sigma_x}{2 \epsilon} \left(B_z|_{i+1/2,j+1/2,k}^{n+3/2}+B_z|_{i+1/2,j+1/2,k}^{n+1/2}\right) \,.
+\end{eqnarray}
+\\ \\
+
+Isolando adequadamente os temos:
+\begin{align}
+\alpha_y D_x|_{i+1/2,j,k}^{n+1}=\beta_y D_x|_{i+1/2,j,k}^{n} + \frac{H_z|_{i+1/2,j+1/2,k}^{n+1/2}-H_z|_{i+1/2,j-1/2,k}^{n+1/2}}{\Delta y}-\frac{H_y|_{i+1/2,j,k+1/2}^{n+1/2}-H_y|_{i+1/2,j,k-1/2}^{n+1/2}}{\Delta z}\,,
+\end{align}
+
+\begin{align}
+\alpha_z D_y|_{i,j+1/2,k}^{n+1} = \beta_z D_y|_{i,j+1/2,k}^{n} + \frac{H_x|_{i,j+1/2,k+1/2}^{n+1/2}-H_x|_{i,j+1/2,k-1/2}^{n+1/2}}{\Delta z}-\frac{H_z|_{i+1/2,j+1/2,k}^{n+1/2}-H_z|_{i-1/2,j+1/2,k}^{n+1/2}}{\Delta x}\,,
+\end{align}
+
+\begin{align}
+\alpha_x D_z|_{i,j,k+1/2}^{n+1} = \beta_x D_z|_{i,j,k+1/2}^{n} + \frac{H_y|_{i+1/2,j,k+1/2}^{n+1/2}-H_y|_{i-1/2,j,k+1/2}^{n+1/2}}{\Delta x}-\frac{H_x|_{i,j+1/2,k+1/2}^{n+1/2}-H_x|_{i,j-1/2,k+1/2}^{n+1/2}}{\Delta y} \,,
+\end{align}
+
+\begin{align}
+\alpha_y  B_x|_{i,j+1/2,k+1/2}^{n+3/2}= \beta_y B_x|_{i,j+1/2,k+1/2}^{n+1/2} + \frac{E_y|_{i,j+1/2,k}^{n+1}-E_y|_{i,j+1/2,k-1}^{n+1}}{\Delta z} - \frac{E_z|_{i,j,k+1/2}^{n+1}-E_z|_{i,j-1,k+1/2}^{n+1}}{\Delta y}\,,
+\end{align}
+
+\begin{align}
+\alpha_z B_y|_{i+1/2,j,k+1/2}^{n+3/2} = \beta_z B_y|_{i+1/2,j,k+1/2}^{n+1/2} + \frac{E_z|_{i,j,k+1/2}^{n+1}-E_z|_{i-1,j,k+1/2}^{n+1}}{\Delta x}-\frac{E_x|_{i+1/2,j,k}^{n+1}-E_x|_{i+1/2,j,k-1}^{n+1}}{\Delta z}\,,
+\end{align}
+
+\begin{align}
+\alpha_x B_z|_{i+1/2,j+1/2,k}^{n+3/2}= \beta_x B_z|_{i+1/2,j+1/2,k}^{n+1/2} + \frac{E_x|_{i+1/2,j,k}^{n+1}-E_x|_{i+1/2,j-1,k}^{n+1}}{\Delta y} - \frac{E_y|_{i,j+1/2,k}^{n+1}-E_y|_{i-1,j+1/2,k}^{n+1}}{\Delta x}\,,
+\end{align}
+
+onde, 
+
+\begin{align}
+\alpha_{x,y,z}=\frac{\kappa_{x,y,z}}{\Delta {x,y,z}}+\frac{\sigma_{x,y,z}}{2 \epsilon}\,, 
+\end{align}
+
+\begin{align}
+\beta_{x,y,z}=\frac{\kappa_{x,y,z}}{\Delta {x,y,z}}+\frac{\sigma_{x,y,z}}{2 \epsilon}\,.
+\end{align}
+
+Precisamos também da discretização das relações constitutivas:
+
+\begin{align}
+\alpha_z E_x |_{i+1/2,j,k}^{n+1/2} =
+\beta_z E_x |_{i+1/2,j,k}^{n-1/2}  +
+\frac{1}{\epsilon} \alpha_x  D_x |_{i+1/2,j,k}^{n+1/2}  -
+\frac{1}{\epsilon} \beta_x  D_x |_{i+1/2,j,k}^{n-1/2}\,
+\end{align}
+
+\begin{align}
+\alpha_x E_y |_{i,j+1/2,k}^{n+1/2} =
+\beta_x  E_y |_{i,j+1/2,k}^{n-1/2} +
+\frac{1}{\epsilon} \alpha_y  D_y |_{i,j+1/2,k}^{n+1/2}  -
+\frac{1}{\epsilon} \beta_y  D_y |_{i,j+1/2,k}^{n-1/2}\,
+\end{align}
+
+\begin{align}
+\alpha_y E_z |_{i,j,k+1/2}^{n+1/2} =
+\beta_y E_z |_{i,j,k+1/2}^{n-1/2}  +
+\frac{1}{\epsilon} \alpha_z  D_z |_{i,j,k+1/2}^{n+1/2}  -
+\frac{1}{\epsilon} \beta_z  D_z |_{i,j,k+1/2}^{n-1/2}\,
+\end{align}
+
+\begin{align}
+\alpha_z H_x |_{i,j+1/2,k+1/2}^{n+1} = 
+\beta_z H_x |_{i,j+1/2,k+1/2}^{n}   +
+\frac{1}{\mu} \alpha_x B_x |_{i,j+1/2,k+1/2}^{n+1}  -
+\frac{1}{\mu} \beta_x B_x |_{i,j+1/2,k+1/2}^{n}\,.
+\end{align}
+
+\begin{align}
+\alpha_x H_y |_{i+1/2,j,k+1/2}^{n+1} = 
+\beta_x H_y |_{i+1/2,j,k+1/2}^{n} +
+\frac{1}{\mu} \alpha_y B_y |_{i+1/2,j,k+1/2}^{n+1}  -
+\frac{1}{\mu} \beta_y B_y |_{i+1/2,j,k+1/2}^{n}\,.
+\end{align}
+
+\begin{align}
+\alpha_y H_z |_{i+1/2,j+1/2,k}^{n+1} = 
+\beta_y H_z |_{i+1/2,j+1/2,k}^{n} +
+\frac{1}{\mu} \alpha_z B_z |_{i+1/2,j+1/2,k}^{n+1}  -
+\frac{1}{\mu} \beta_z B_z |_{i+1/2,j+1/2,k}^{n}\,.
+\end{align}
+
+
+\end{document}
